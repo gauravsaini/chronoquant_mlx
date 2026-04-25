@@ -6,45 +6,45 @@ MAX_FUSED_HEAD_DIM = 256
 FUSED_SIMDGROUPS = 31
 FUSED_THREADGROUP_SIZE = FUSED_SIMDGROUPS * 32
 
-_PACK_INT4_SOURCE = """
+_PACK_INT2_SOURCE = """
     uint word_idx = thread_position_in_grid.x;
-    uint base = word_idx * 8;
+    uint base = word_idx * 16;
     uint total = codes_shape[0];
 
     uint32_t packed = 0;
-    for (uint i = 0; i < 8; i++) {
+    for (uint i = 0; i < 16; i++) {
         uint idx = base + i;
         if (idx < total) {
-            packed |= (static_cast<uint32_t>(codes[idx]) & 0xFu) << (i * 4);
+            packed |= (static_cast<uint32_t>(codes[idx]) & 0x3u) << (i * 2);
         }
     }
     packed_codes[word_idx] = packed;
 """
 
-_pack_int4_kernel = mx.fast.metal_kernel(
-    name="chronoquant_pack_int4",
+_pack_int2_kernel = mx.fast.metal_kernel(
+    name="chronoquant_pack_int2",
     input_names=["codes"],
     output_names=["packed_codes"],
-    source=_PACK_INT4_SOURCE,
+    source=_PACK_INT2_SOURCE,
 )
 
-_INT4_SHIFTS = mx.array([i * 4 for i in range(8)], dtype=mx.uint32)
+_INT2_SHIFTS = mx.array([i * 2 for i in range(16)], dtype=mx.uint32)
 
 
-def pack_int4_codes(codes: mx.array) -> mx.array:
-    """Pack signed INT4 codes [-8, 7] into uint32 words."""
+def pack_int2_codes(codes: mx.array) -> mx.array:
+    """Pack signed INT2 codes [-2, 1] into uint32 words."""
     original_shape = codes.shape
     head_dim = original_shape[-1]
-    num_words = (head_dim + 7) // 8
+    num_words = (head_dim + 15) // 16
 
-    unsigned = mx.clip(codes.astype(mx.int32) + 8, 0, 15).astype(mx.uint32)
-    if head_dim % 8 != 0:
-        pad = num_words * 8 - head_dim
+    unsigned = mx.clip(codes.astype(mx.int32) + 2, 0, 3).astype(mx.uint32)
+    if head_dim % 16 != 0:
+        pad = num_words * 16 - head_dim
         unsigned = mx.pad(unsigned, [(0, 0)] * (unsigned.ndim - 1) + [(0, pad)])
 
     flat = unsigned.reshape(-1)
-    total_words = flat.size // 8
-    outputs = _pack_int4_kernel(
+    total_words = flat.size // 16
+    outputs = _pack_int2_kernel(
         inputs=[flat],
         grid=(total_words, 1, 1),
         threadgroup=(min(256, max(total_words, 1)), 1, 1),
@@ -54,11 +54,11 @@ def pack_int4_codes(codes: mx.array) -> mx.array:
     return outputs[0].reshape(*original_shape[:-1], num_words)
 
 
-def unpack_int4_codes(packed: mx.array, head_dim: int) -> mx.array:
-    """Unpack uint32 words back to signed INT4 codes [-8, 7]."""
-    expanded = ((packed[..., None] >> _INT4_SHIFTS) & 0xF).astype(mx.int32)
-    expanded = expanded.reshape(*packed.shape[:-1], packed.shape[-1] * 8)
-    return (expanded[..., :head_dim] - 8).astype(mx.int8)
+def unpack_int2_codes(packed: mx.array, head_dim: int) -> mx.array:
+    """Unpack uint32 words back to signed INT2 codes [-2, 1]."""
+    expanded = ((packed[..., None] >> _INT2_SHIFTS) & 0x3).astype(mx.int32)
+    expanded = expanded.reshape(*packed.shape[:-1], packed.shape[-1] * 16)
+    return (expanded[..., :head_dim] - 2).astype(mx.int8)
 
 
 _CHRONOQUANT_SDPA_HEADER = """
@@ -69,10 +69,10 @@ constant uint MAX_HEAD_DIM = 256;
 constant uint MAX_SLOTS = MAX_HEAD_DIM / 32;
 constant uint NUM_SIMDGROUPS = 31;
 
-inline int unpack_signed_int4(const device uint32_t* packed, uint dim) {
-    uint word = dim >> 3;
-    uint shift = (dim & 7) << 2;
-    return int((packed[word] >> shift) & 0xFu) - 8;
+inline int unpack_signed_int2(const device uint32_t* packed, uint dim) {
+    uint word = dim >> 4;
+    uint shift = (dim & 15) << 1;
+    return int((packed[word] >> shift) & 0x3u) - 2;
 }
 """
 
@@ -152,7 +152,7 @@ _CHRONOQUANT_SDPA_SOURCE = """
             float k_val = static_cast<float>(keyframes_k[kf_base_k + dim]);
             k_val += static_cast<float>(velocities_k[kf_base_k + dim]) * static_cast<float>(t % stride_k);
             if (!k_is_keyframe) {
-                k_val += static_cast<float>(unpack_signed_int4(token_packed_k, dim)) * k_scale;
+                k_val += static_cast<float>(unpack_signed_int2(token_packed_k, dim)) * k_scale;
             }
             partial += q_local[s] * k_val;
         }
@@ -174,7 +174,7 @@ _CHRONOQUANT_SDPA_SOURCE = """
             float v_val = static_cast<float>(keyframes_v[kf_base_v + dim]);
             v_val += static_cast<float>(velocities_v[kf_base_v + dim]) * static_cast<float>(t % stride_v);
             if (!v_is_keyframe) {
-                v_val += static_cast<float>(unpack_signed_int4(token_packed_v, dim)) * v_scale;
+                v_val += static_cast<float>(unpack_signed_int2(token_packed_v, dim)) * v_scale;
             }
             local_acc[s] = local_acc[s] * factor + exp_s * v_val;
         }

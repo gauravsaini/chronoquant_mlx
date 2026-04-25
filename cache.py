@@ -1,7 +1,7 @@
 import mlx.core as mx
 
 from .codec import ChronoQuantCodecMLX
-from .kernels import pack_int4_codes, unpack_int4_codes
+from .kernels import pack_int2_codes, unpack_int2_codes
 
 
 def make_causal_mask(offset: int, num_queries: int, return_array: bool = False, window_size=None):
@@ -22,7 +22,7 @@ class ChronoQuantCache:
         self,
         stride_k: int = 32,
         stride_v: int = 8,
-        delta_bits: int = 4,
+        delta_bits: int = 2,
         use_fused: bool = True,
     ):
         self.stride_k = stride_k
@@ -128,7 +128,7 @@ class ChronoQuantCache:
             prediction = prediction.astype(token.dtype)
             delta = token - prediction
             codes, scale = codec.quantize_delta(delta)
-            new_packed.append(pack_int4_codes(codes))
+            new_packed.append(pack_int2_codes(codes))
             new_scales.append(scale.squeeze(-1).astype(mx.float16))
 
         if new_keyframes:
@@ -176,7 +176,7 @@ class ChronoQuantCache:
         safe_pf_idx = mx.maximum(pf_idx, 0)
         is_pframe = (positions % stride != 0).reshape(1, 1, -1, 1)
 
-        codes = unpack_int4_codes(packed, self.head_dim)
+        codes = unpack_int2_codes(packed, self.head_dim)
         gathered_codes = mx.take(codes, safe_pf_idx, axis=2)
         gathered_scales = mx.take(scales, safe_pf_idx, axis=2)[..., None]
         delta = codec.dequantize_delta(gathered_codes, gathered_scales)
