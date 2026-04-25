@@ -43,6 +43,16 @@ class ChronoQuantCache:
         self.pframe_scales_v = None
         self.velocities_k = None
         self.velocities_v = None
+        
+        self.basis_k = None
+        self.basis_v = None
+
+    def _get_basis(self, D: int, r: int, seed: int):
+        import numpy as np
+        state = np.random.RandomState(seed)
+        X = state.randn(D, r)
+        Q, _ = np.linalg.qr(X)
+        return mx.array(Q, dtype=mx.float16)
 
     @staticmethod
     def _num_keyframes(num_tokens: int, stride: int) -> int:
@@ -226,9 +236,7 @@ class ChronoQuantCache:
         _, _, _, head_dim = keys.shape
         if self.head_dim is None:
             self.head_dim = head_dim
-        elif head_dim != self.head_dim:
-            raise ValueError(f"ChronoQuantCache head_dim changed: {self.head_dim} -> {head_dim}")
-
+            
         self._append_component("k", keys, self.stride_k, self.codec_k)
         self._append_component("v", values, self.stride_v, self.codec_v)
         self.offset += keys.shape[2]

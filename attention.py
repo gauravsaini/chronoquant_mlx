@@ -30,7 +30,7 @@ def chronoquant_sdpa(
 ):
     """ChronoQuant SDPA with fused generation path and MLX fallback."""
     batch, n_q_heads, q_len, head_dim = queries.shape
-
+    
     use_fused = (
         cache.use_fused
         and
@@ -58,7 +58,8 @@ def chronoquant_sdpa(
             stride_k=cache.stride_k,
             stride_v=cache.stride_v,
         )
-        return out.reshape(batch, n_q_heads, q_len, head_dim).astype(queries.dtype)
+        out_reshaped = out.reshape(batch, n_q_heads, q_len, head_dim)
+        return out_reshaped.astype(queries.dtype)
 
     full_k, full_v = cache.reconstruct_history()
     n_kv_heads = full_k.shape[1]
