@@ -183,14 +183,18 @@ class ChronoQuantCache:
 
     def update_and_fetch(self, keys: mx.array, values: mx.array):
         """Compress new KV states and return lightweight placeholders."""
-        _, _, _, head_dim = keys.shape
+        # Spatial Subsampling (Luma only): Average across KV heads
+        keys_mean = keys.mean(axis=1, keepdims=True)
+        values_mean = values.mean(axis=1, keepdims=True)
+        
+        _, _, _, head_dim = keys_mean.shape
         if self.head_dim is None:
             self.head_dim = head_dim
         elif head_dim != self.head_dim:
             raise ValueError(f"ChronoQuantCache head_dim changed: {self.head_dim} -> {head_dim}")
 
-        self._append_component("k", keys, self.stride_k, self.codec_k)
-        self._append_component("v", values, self.stride_v, self.codec_v)
+        self._append_component("k", keys_mean, self.stride_k, self.codec_k)
+        self._append_component("v", values_mean, self.stride_v, self.codec_v)
         self.offset += keys.shape[2]
 
         state = self.state
