@@ -22,15 +22,21 @@ class ChronoQuantCache:
         self,
         stride_k: int = 32,
         stride_v: int = 8,
-        delta_bits: int = 4,
+        delta_bits_k: int = 4,
+        delta_bits_v: int = 4,
+        dead_zone_k: float = 0.0,
+        dead_zone_v: float = 0.05,
         use_fused: bool = True,
     ):
         self.stride_k = stride_k
         self.stride_v = stride_v
-        self.delta_bits = delta_bits
+        self.delta_bits_k = delta_bits_k
+        self.delta_bits_v = delta_bits_v
+        self.dead_zone_k = dead_zone_k
+        self.dead_zone_v = dead_zone_v
         self.use_fused = use_fused
-        self.codec_k = ChronoQuantCodecMLX(stride=stride_k, delta_bits=delta_bits)
-        self.codec_v = ChronoQuantCodecMLX(stride=stride_v, delta_bits=delta_bits)
+        self.codec_k = ChronoQuantCodecMLX(stride=stride_k, delta_bits=delta_bits_k, dead_zone_ratio=dead_zone_k)
+        self.codec_v = ChronoQuantCodecMLX(stride=stride_v, delta_bits=delta_bits_v, dead_zone_ratio=dead_zone_v)
 
         self.offset = 0
         self.head_dim = None
