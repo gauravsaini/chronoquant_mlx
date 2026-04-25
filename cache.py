@@ -28,7 +28,7 @@ class ChronoQuantCache:
         residual_scale: float = 1.0,
         pruning_ratio: float = 0.0,
         pruning_ratio_k: float = 0.0,
-        pruning_ratio_v: float = 0.0,
+        pruning_ratio_v: float = 0.1,
     ):
         self.stride_k = stride_k
         self.stride_v = stride_v
