@@ -70,8 +70,10 @@ def create_chronoquant_caches(
     model,
     stride_k: int = 32,
     stride_v: int = 8,
-    delta_bits: int = 4,
+    delta_bits_k: int = 4,
+    delta_bits_v: int = 3,
     use_fused: bool = True,
+    residual_scale: float = 1.0,
 ):
     """Create ChronoQuant caches for all KV cache slots in model."""
     from mlx_lm.models.cache import KVCache, make_prompt_cache
@@ -82,7 +84,9 @@ def create_chronoquant_caches(
             caches[index] = ChronoQuantCache(
                 stride_k=stride_k,
                 stride_v=stride_v,
-                delta_bits=delta_bits,
+                delta_bits_k=delta_bits_k,
+                delta_bits_v=delta_bits_v,
                 use_fused=use_fused,
+                residual_scale=residual_scale,
             )
     return caches
