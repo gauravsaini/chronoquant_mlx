@@ -26,6 +26,7 @@ class ChronoQuantCache:
         delta_bits_v: int = 3,
         use_fused: bool = True,
         residual_scale: float = 1.0,
+        pruning_ratio: float = 0.0,
     ):
         self.stride_k = stride_k
         self.stride_v = stride_v
@@ -33,6 +34,7 @@ class ChronoQuantCache:
         self.delta_bits_v = delta_bits_v
         self.use_fused = use_fused
         self.residual_scale = residual_scale
+        self.pruning_ratio = pruning_ratio
         
         self.codec_k = ChronoQuantCodecMLX(stride=stride_k, delta_bits=delta_bits_k)
         self.codec_v = ChronoQuantCodecMLX(stride=stride_v, delta_bits=delta_bits_v)
@@ -143,6 +145,15 @@ class ChronoQuantCache:
             prediction = prediction.astype(token.dtype)
             delta = token - prediction
             delta = delta * self.residual_scale
+
+            if self.pruning_ratio > 0.0:
+                abs_delta = mx.abs(delta)
+                flat_delta = abs_delta.flatten()
+                sorted_flat = mx.sort(flat_delta)
+                idx = int(flat_delta.size * self.pruning_ratio)
+                idx = min(idx, flat_delta.size - 1)
+                thresh = sorted_flat[idx]
+                delta = mx.where(abs_delta < thresh, mx.zeros_like(delta), delta)
             codes, scale = codec.quantize_delta(delta)
             new_packed.append(pack_int4_codes(codes))
             new_scales.append(scale.squeeze(-1).astype(mx.float16))

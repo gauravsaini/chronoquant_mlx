@@ -74,6 +74,7 @@ def create_chronoquant_caches(
     delta_bits_v: int = 3,
     use_fused: bool = True,
     residual_scale: float = 1.0,
+    pruning_ratio: float = 0.0,
 ):
     """Create ChronoQuant caches for all KV cache slots in model."""
     from mlx_lm.models.cache import KVCache, make_prompt_cache
@@ -88,5 +89,6 @@ def create_chronoquant_caches(
                 delta_bits_v=delta_bits_v,
                 use_fused=use_fused,
                 residual_scale=residual_scale,
+                pruning_ratio=pruning_ratio,
             )
     return caches
