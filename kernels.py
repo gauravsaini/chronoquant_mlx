@@ -149,8 +149,18 @@ _CHRONOQUANT_SDPA_SOURCE = """
                 continue;
             }
 
-            float k_val = static_cast<float>(keyframes_k[kf_base_k + dim]);
-            if (!k_is_keyframe) {
+            float k_val;
+            bool has_next_k = (k_anchor + 1 < kf_count_k);
+            if (k_is_keyframe) {
+                k_val = static_cast<float>(keyframes_k[kf_base_k + dim]);
+            } else if (has_next_k) {
+                float k0 = static_cast<float>(keyframes_k[kf_base_k + dim]);
+                float k1 = static_cast<float>(keyframes_k[(kv_head * kf_count_k + k_anchor + 1) * D + dim]);
+                float alpha = static_cast<float>(t % stride_k) / static_cast<float>(stride_k);
+                k_val = k0 * (1.0f - alpha) + k1 * alpha;
+                k_val += static_cast<float>(unpack_signed_int4(token_packed_k, dim)) * k_scale;
+            } else {
+                k_val = static_cast<float>(keyframes_k[kf_base_k + dim]);
                 k_val += static_cast<float>(unpack_signed_int4(token_packed_k, dim)) * k_scale;
             }
             partial += q_local[s] * k_val;
@@ -170,8 +180,18 @@ _CHRONOQUANT_SDPA_SOURCE = """
                 continue;
             }
 
-            float v_val = static_cast<float>(keyframes_v[kf_base_v + dim]);
-            if (!v_is_keyframe) {
+            float v_val;
+            bool has_next_v = (v_anchor + 1 < kf_count_v);
+            if (v_is_keyframe) {
+                v_val = static_cast<float>(keyframes_v[kf_base_v + dim]);
+            } else if (has_next_v) {
+                float v0 = static_cast<float>(keyframes_v[kf_base_v + dim]);
+                float v1 = static_cast<float>(keyframes_v[(kv_head * kf_count_v + v_anchor + 1) * D + dim]);
+                float alpha = static_cast<float>(t % stride_v) / static_cast<float>(stride_v);
+                v_val = v0 * (1.0f - alpha) + v1 * alpha;
+                v_val += static_cast<float>(unpack_signed_int4(token_packed_v, dim)) * v_scale;
+            } else {
+                v_val = static_cast<float>(keyframes_v[kf_base_v + dim]);
                 v_val += static_cast<float>(unpack_signed_int4(token_packed_v, dim)) * v_scale;
             }
             local_acc[s] = local_acc[s] * factor + exp_s * v_val;

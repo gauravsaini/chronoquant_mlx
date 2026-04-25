@@ -98,11 +98,29 @@ class ChronoQuantCache:
 
             anchor_idx = token_idx // stride
             if anchor_idx < existing_n_kf:
-                anchor = existing_keyframes[:, :, anchor_idx : anchor_idx + 1, :]
+                anchor0 = existing_keyframes[:, :, anchor_idx : anchor_idx + 1, :]
             else:
-                anchor = new_keyframes[anchor_idx - existing_n_kf]
+                anchor0 = new_keyframes[anchor_idx - existing_n_kf]
 
-            delta = token - anchor.astype(token.dtype)
+            next_kf_idx = anchor_idx + 1
+            next_kf_token_idx = next_kf_idx * stride
+            
+            anchor1 = None
+            if next_kf_idx < existing_n_kf:
+                anchor1 = existing_keyframes[:, :, next_kf_idx : next_kf_idx + 1, :]
+            else:
+                local_next_kf = next_kf_token_idx - self.offset
+                if local_next_kf < tensor.shape[2]:
+                    anchor1 = tensor[:, :, local_next_kf : local_next_kf + 1, :]
+            
+            if anchor1 is not None:
+                alpha = (token_idx % stride) / float(stride)
+                anchor = anchor0.astype(mx.float32) * (1.0 - alpha) + anchor1.astype(mx.float32) * alpha
+                anchor = anchor.astype(token.dtype)
+            else:
+                anchor = anchor0.astype(token.dtype)
+
+            delta = token - anchor
             codes, scale = codec.quantize_delta(delta)
             new_packed.append(pack_int4_codes(codes))
             new_scales.append(scale.squeeze(-1).astype(mx.float16))
@@ -137,6 +155,17 @@ class ChronoQuantCache:
         if packed is None or scales is None or packed.shape[2] == 0:
             return full
 
+        existing_n_kf = keyframes.shape[2]
+        has_next = (anchor_idx + 1) < existing_n_kf
+        next_anchor_idx = mx.minimum(anchor_idx + 1, existing_n_kf - 1)
+        full_next = mx.take(keyframes, next_anchor_idx, axis=2).astype(mx.float16)
+        
+        alpha = (positions % stride).astype(mx.float16) / float(stride)
+        alpha = alpha.reshape(1, 1, -1, 1)
+        has_next = has_next.reshape(1, 1, -1, 1)
+        
+        anchor = mx.where(has_next, full * (1.0 - alpha) + full_next * alpha, full)
+
         pf_idx = positions - anchor_idx - 1
         safe_pf_idx = mx.maximum(pf_idx, 0)
         is_pframe = (positions % stride != 0).reshape(1, 1, -1, 1)
@@ -145,7 +174,7 @@ class ChronoQuantCache:
         gathered_codes = mx.take(codes, safe_pf_idx, axis=2)
         gathered_scales = mx.take(scales, safe_pf_idx, axis=2)[..., None]
         delta = codec.dequantize_delta(gathered_codes, gathered_scales)
-        return full + mx.where(is_pframe, delta, mx.zeros_like(delta))
+        return anchor + mx.where(is_pframe, delta, mx.zeros_like(delta))
 
     def reconstruct_history(self):
         """Reconstruct full K/V history for fallback attention paths."""
