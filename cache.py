@@ -92,60 +92,103 @@ class ChronoQuantCache:
         packed_attr = "packed_codes_k" if component == "k" else "packed_codes_v"
         scales_attr = "pframe_scales_k" if component == "k" else "pframe_scales_v"
 
-        existing_keyframes = getattr(self, keyframes_attr)
-        existing_velocities = getattr(self, velocities_attr)
-        existing_n_kf = self._num_keyframes(self.offset, stride)
+        n_kv_heads = tensor.shape[1]
+        all_head_keyframes = []
+        all_head_velocities = []
+        all_head_packed = []
+        all_head_scales = []
 
-        new_keyframes = []
-        new_velocities = []
-        new_packed = []
-        new_scales = []
-
-        for local_t in range(tensor.shape[2]):
-            token_idx = self.offset + local_t
-            token = tensor[:, :, local_t : local_t + 1, :]
-
-            if token_idx % stride == 0:
-                new_keyframes.append(token.astype(mx.float16))
-                local_end = local_t + stride - 1
-                if local_end < tensor.shape[2]:
-                    token_end = tensor[:, :, local_end : local_end + 1, :]
-                    vel = (token_end - token.astype(token.dtype)) / float(stride)
-                else:
-                    vel = mx.zeros_like(token)
-                new_velocities.append(vel.astype(mx.float16))
-                continue
-
-            anchor_idx = token_idx // stride
-            if anchor_idx < existing_n_kf:
-                anchor = existing_keyframes[:, :, anchor_idx : anchor_idx + 1, :]
-                vel = existing_velocities[:, :, anchor_idx : anchor_idx + 1, :]
+        for h in range(n_kv_heads):
+            head_tensor = tensor[:, h : h + 1, :, :]
+            offset_h = (h * (stride // n_kv_heads)) % stride
+            
+            existing_keyframes = getattr(self, keyframes_attr)
+            existing_velocities = getattr(self, velocities_attr)
+            if offset_h == 0:
+                existing_n_kf = 0 if self.offset == 0 else ((self.offset - 1) // stride) + 1
             else:
-                anchor = new_keyframes[anchor_idx - existing_n_kf]
-                vel = new_velocities[anchor_idx - existing_n_kf]
+                existing_n_kf = 0 if self.offset == 0 else (1 if self.offset <= offset_h else ((self.offset - offset_h - 1) // stride) + 2)
+            
+            head_keyframes = []
+            head_velocities = []
+            head_packed = []
+            head_scales = []
+            
+            for local_t in range(head_tensor.shape[2]):
+                token_idx = self.offset + local_t
+                token = head_tensor[:, :, local_t : local_t + 1, :]
+                
+                is_kf = (token_idx == 0) or (token_idx >= offset_h and (token_idx - offset_h) % stride == 0)
+                if is_kf:
+                    head_keyframes.append(token.astype(mx.float16))
+                    local_end = local_t + stride - 1
+                    if local_end < head_tensor.shape[2]:
+                        token_end = head_tensor[:, :, local_end : local_end + 1, :]
+                        vel = (token_end - token.astype(token.dtype)) / float(stride)
+                    else:
+                        vel = mx.zeros_like(token)
+                    head_velocities.append(vel.astype(mx.float16))
+                    continue
+                
+                anchor_idx = 0 if token_idx < offset_h else (token_idx - offset_h) // stride + (1 if offset_h > 0 else 0)
+                if anchor_idx < existing_n_kf:
+                    anchor = existing_keyframes[:, h : h + 1, anchor_idx : anchor_idx + 1, :]
+                    vel = existing_velocities[:, h : h + 1, anchor_idx : anchor_idx + 1, :]
+                else:
+                    anchor = head_keyframes[anchor_idx - existing_n_kf]
+                    vel = head_velocities[anchor_idx - existing_n_kf]
+                
+                prediction = anchor.astype(mx.float32) + vel.astype(mx.float32) * float(token_idx - (0 if anchor_idx == 0 else offset_h + (anchor_idx - (1 if offset_h > 0 else 0)) * stride))
+                prediction = prediction.astype(token.dtype)
+                delta = token - prediction
+                codes, scale = codec.quantize_delta(delta)
+                head_packed.append(pack_int4_codes(codes))
+                head_scales.append(scale.squeeze(-1).astype(mx.float16))
+            
+            packed_words = (tensor.shape[3] + 7) // 8
+            all_head_keyframes.append(mx.concatenate(head_keyframes, axis=2) if head_keyframes else mx.zeros((1, 1, 0, tensor.shape[3]), dtype=mx.float16))
+            all_head_velocities.append(mx.concatenate(head_velocities, axis=2) if head_velocities else mx.zeros((1, 1, 0, tensor.shape[3]), dtype=mx.float16))
+            all_head_packed.append(mx.concatenate(head_packed, axis=2) if head_packed else mx.zeros((1, 1, 0, packed_words), dtype=mx.uint32))
+            all_head_scales.append(mx.concatenate(head_scales, axis=2) if head_scales else mx.zeros((1, 1, 0), dtype=mx.float16))
 
-            prediction = anchor.astype(mx.float32) + vel.astype(mx.float32) * float(token_idx % stride)
-            prediction = prediction.astype(token.dtype)
-            delta = token - prediction
-            codes, scale = codec.quantize_delta(delta)
-            new_packed.append(pack_int4_codes(codes))
-            new_scales.append(scale.squeeze(-1).astype(mx.float16))
-
-        if new_keyframes:
-            stacked_kf = mx.concatenate(new_keyframes, axis=2)
-            stacked_vel = mx.concatenate(new_velocities, axis=2)
+        # Pad across heads to maximum length
+        max_kf = max(k.shape[2] for k in all_head_keyframes) if all_head_keyframes else 0
+        if max_kf > 0:
+            padded_kf = []
+            padded_vel = []
+            for k, v in zip(all_head_keyframes, all_head_velocities):
+                pad_len = max_kf - k.shape[2]
+                if pad_len > 0:
+                    k = mx.concatenate([k, mx.zeros((1, 1, pad_len, k.shape[3]), dtype=k.dtype)], axis=2)
+                    v = mx.concatenate([v, mx.zeros((1, 1, pad_len, v.shape[3]), dtype=v.dtype)], axis=2)
+                padded_kf.append(k)
+                padded_vel.append(v)
+            stacked_kf = mx.concatenate(padded_kf, axis=1)
+            stacked_vel = mx.concatenate(padded_vel, axis=1)
+            
             current_kf = getattr(self, keyframes_attr)
             current_vel = getattr(self, velocities_attr)
             setattr(self, keyframes_attr, stacked_kf if current_kf is None else mx.concatenate([current_kf, stacked_kf], axis=2))
             setattr(self, velocities_attr, stacked_vel if current_vel is None else mx.concatenate([current_vel, stacked_vel], axis=2))
 
-        if new_packed:
-            packed = mx.concatenate(new_packed, axis=2)
-            scales = mx.concatenate(new_scales, axis=2)
+        max_pf = max(p.shape[2] for p in all_head_packed) if all_head_packed else 0
+        if max_pf > 0:
+            padded_packed = []
+            padded_scales = []
+            for p, s in zip(all_head_packed, all_head_scales):
+                pad_len = max_pf - p.shape[2]
+                if pad_len > 0:
+                    p = mx.concatenate([p, mx.zeros((1, 1, pad_len, p.shape[3]), dtype=p.dtype)], axis=2)
+                    s = mx.concatenate([s, mx.zeros((1, 1, pad_len), dtype=s.dtype)], axis=2)
+                padded_packed.append(p)
+                padded_scales.append(s)
+            stacked_packed = mx.concatenate(padded_packed, axis=1)
+            stacked_scales = mx.concatenate(padded_scales, axis=1)
+            
             current_packed = getattr(self, packed_attr)
             current_scales = getattr(self, scales_attr)
-            setattr(self, packed_attr, packed if current_packed is None else mx.concatenate([current_packed, packed], axis=2))
-            setattr(self, scales_attr, scales if current_scales is None else mx.concatenate([current_scales, scales], axis=2))
+            setattr(self, packed_attr, stacked_packed if current_packed is None else mx.concatenate([current_packed, stacked_packed], axis=2))
+            setattr(self, scales_attr, stacked_scales if current_scales is None else mx.concatenate([current_scales, stacked_scales], axis=2))
 
     def _reconstruct_component(self, component: str):
         if self.offset == 0:
@@ -156,31 +199,56 @@ class ChronoQuantCache:
         keyframes = self._active_keyframes(component)
         packed = self._active_packed(component)
         scales = self._active_scales(component)
-
-        positions = mx.arange(self.offset, dtype=mx.int32)
-        anchor_idx = positions // stride
-        full = mx.take(keyframes, anchor_idx, axis=2).astype(mx.float16)
-        
         velocities = self._active_velocities(component)
-        if velocities is not None:
-            vel = mx.take(velocities, anchor_idx, axis=2).astype(mx.float16)
-            alpha = (positions % stride).astype(mx.float16).reshape(1, 1, -1, 1)
-            prediction = full + vel * alpha
-        else:
-            prediction = full
 
-        if packed is None or scales is None or packed.shape[2] == 0:
-            return prediction
+        n_kv_heads = keyframes.shape[1] if keyframes is not None else 1
+        all_head_reconstructed = []
 
-        pf_idx = positions - anchor_idx - 1
-        safe_pf_idx = mx.maximum(pf_idx, 0)
-        is_pframe = (positions % stride != 0).reshape(1, 1, -1, 1)
+        for h in range(n_kv_heads):
+            offset_h = (h * (stride // n_kv_heads)) % stride
+            
+            # Reconstruct for head h
+            head_kf = keyframes[:, h : h + 1, :, :] if keyframes is not None else None
+            head_vel = velocities[:, h : h + 1, :, :] if velocities is not None else None
+            head_packed = packed[:, h : h + 1, :, :] if packed is not None else None
+            head_scales = scales[:, h : h + 1, :] if scales is not None else None
+            
+            positions = mx.arange(self.offset, dtype=mx.int32)
+            
+            # Head-wise anchor and time logic
+            is_kf = (positions == 0) | ((positions >= offset_h) & ((positions - offset_h) % stride == 0))
+            anchor_idx = mx.where(positions < offset_h, 0, (positions - offset_h) // stride + (1 if offset_h > 0 else 0))
+            kf_time = mx.where(anchor_idx == 0, 0, offset_h + (anchor_idx - (1 if offset_h > 0 else 0)) * stride)
+            
+            full = mx.take(head_kf, anchor_idx, axis=2).astype(mx.float16) if head_kf is not None else mx.zeros((1, 1, self.offset, self.head_dim), dtype=mx.float16)
+            
+            if head_vel is not None:
+                vel = mx.take(head_vel, anchor_idx, axis=2).astype(mx.float16)
+                alpha = (positions - kf_time).astype(mx.float16).reshape(1, 1, -1, 1)
+                prediction = full + vel * alpha
+            else:
+                prediction = full
+                
+            if head_packed is None or head_scales is None or head_packed.shape[2] == 0:
+                all_head_reconstructed.append(prediction)
+                continue
+                
+            pf_idx = positions - kf_time - 1
+            # For keyframes, pf_idx is negative, we use 0 safely since we mask it out anyway
+            safe_pf_idx = mx.maximum(pf_idx, 0)
+            
+            # Unpack codes
+            codes = unpack_int4_codes(head_packed, self.head_dim)
+            gathered_codes = mx.take(codes, safe_pf_idx, axis=2)
+            gathered_scales = mx.take(head_scales, safe_pf_idx, axis=2)[..., None]
+            delta = codec.dequantize_delta(gathered_codes, gathered_scales)
+            
+            # Apply delta only where it's a P-frame
+            is_pframe = (~is_kf).reshape(1, 1, -1, 1)
+            reconstructed = prediction + mx.where(is_pframe, delta, mx.zeros_like(delta))
+            all_head_reconstructed.append(reconstructed)
 
-        codes = unpack_int4_codes(packed, self.head_dim)
-        gathered_codes = mx.take(codes, safe_pf_idx, axis=2)
-        gathered_scales = mx.take(scales, safe_pf_idx, axis=2)[..., None]
-        delta = codec.dequantize_delta(gathered_codes, gathered_scales)
-        return prediction + mx.where(is_pframe, delta, mx.zeros_like(delta))
+        return mx.concatenate(all_head_reconstructed, axis=1)
 
     def reconstruct_history(self):
         """Reconstruct full K/V history for fallback attention paths."""

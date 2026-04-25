@@ -123,13 +123,18 @@ _CHRONOQUANT_SDPA_SOURCE = """
     float local_sum = 0.0f;
 
     for (uint t = simd_id; t < T_kv; t += NUM_SIMDGROUPS) {
-        uint k_anchor = t / stride_k;
-        bool k_is_keyframe = (t % stride_k) == 0;
-        uint k_pf = k_is_keyframe ? 0 : (t - k_anchor - 1);
+        uint offset_k = (kv_head * (stride_k / n_kv_heads)) % stride_k;
+        uint offset_v = (kv_head * (stride_v / n_kv_heads)) % stride_v;
 
-        uint v_anchor = t / stride_v;
-        bool v_is_keyframe = (t % stride_v) == 0;
-        uint v_pf = v_is_keyframe ? 0 : (t - v_anchor - 1);
+        bool k_is_keyframe = (t == 0) || (t >= offset_k && (t - offset_k) % stride_k == 0);
+        uint k_anchor = (t < offset_k) ? 0 : ((t - offset_k) / stride_k) + 1;
+        uint k_kf_time = (k_anchor == 0) ? 0 : offset_k + (k_anchor - 1) * stride_k;
+        uint k_pf = k_is_keyframe ? 0 : (t - k_kf_time - 1);
+
+        bool v_is_keyframe = (t == 0) || (t >= offset_v && (t - offset_v) % stride_v == 0);
+        uint v_anchor = (t < offset_v) ? 0 : ((t - offset_v) / stride_v) + 1;
+        uint v_kf_time = (v_anchor == 0) ? 0 : offset_v + (v_anchor - 1) * stride_v;
+        uint v_pf = v_is_keyframe ? 0 : (t - v_kf_time - 1);
 
         uint kf_base_k = (kv_head * kf_count_k + k_anchor) * D;
         uint kf_base_v = (kv_head * kf_count_v + v_anchor) * D;
@@ -150,7 +155,7 @@ _CHRONOQUANT_SDPA_SOURCE = """
             }
 
             float k_val = static_cast<float>(keyframes_k[kf_base_k + dim]);
-            k_val += static_cast<float>(velocities_k[kf_base_k + dim]) * static_cast<float>(t % stride_k);
+            k_val += static_cast<float>(velocities_k[kf_base_k + dim]) * static_cast<float>(t - k_kf_time);
             if (!k_is_keyframe) {
                 k_val += static_cast<float>(unpack_signed_int4(token_packed_k, dim)) * k_scale;
             }
@@ -172,7 +177,7 @@ _CHRONOQUANT_SDPA_SOURCE = """
             }
 
             float v_val = static_cast<float>(keyframes_v[kf_base_v + dim]);
-            v_val += static_cast<float>(velocities_v[kf_base_v + dim]) * static_cast<float>(t % stride_v);
+            v_val += static_cast<float>(velocities_v[kf_base_v + dim]) * static_cast<float>(t - v_kf_time);
             if (!v_is_keyframe) {
                 v_val += static_cast<float>(unpack_signed_int4(token_packed_v, dim)) * v_scale;
             }
