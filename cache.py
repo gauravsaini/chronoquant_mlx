@@ -41,6 +41,8 @@ class ChronoQuantCache:
         self.packed_codes_v = None
         self.pframe_scales_k = None
         self.pframe_scales_v = None
+        self.velocities_k = None
+        self.velocities_v = None
 
     @staticmethod
     def _num_keyframes(num_tokens: int, stride: int) -> int:
@@ -76,15 +78,26 @@ class ChronoQuantCache:
             return None
         return tensor[:, :, :count]
 
+    def _active_velocities(self, component: str):
+        tensor = self.velocities_k if component == "k" else self.velocities_v
+        stride = self.stride_k if component == "k" else self.stride_v
+        count = self._num_keyframes(self.offset, stride)
+        if tensor is None:
+            return None
+        return tensor[:, :, :count, :]
+
     def _append_component(self, component: str, tensor: mx.array, stride: int, codec: ChronoQuantCodecMLX):
         keyframes_attr = "keyframes_k" if component == "k" else "keyframes_v"
+        velocities_attr = "velocities_k" if component == "k" else "velocities_v"
         packed_attr = "packed_codes_k" if component == "k" else "packed_codes_v"
         scales_attr = "pframe_scales_k" if component == "k" else "pframe_scales_v"
 
         existing_keyframes = getattr(self, keyframes_attr)
+        existing_velocities = getattr(self, velocities_attr)
         existing_n_kf = self._num_keyframes(self.offset, stride)
 
         new_keyframes = []
+        new_velocities = []
         new_packed = []
         new_scales = []
 
@@ -94,23 +107,37 @@ class ChronoQuantCache:
 
             if token_idx % stride == 0:
                 new_keyframes.append(token.astype(mx.float16))
+                local_end = local_t + stride - 1
+                if local_end < tensor.shape[2]:
+                    token_end = tensor[:, :, local_end : local_end + 1, :]
+                    vel = (token_end - token.astype(token.dtype)) / float(stride)
+                else:
+                    vel = mx.zeros_like(token)
+                new_velocities.append(vel.astype(mx.float16))
                 continue
 
             anchor_idx = token_idx // stride
             if anchor_idx < existing_n_kf:
                 anchor = existing_keyframes[:, :, anchor_idx : anchor_idx + 1, :]
+                vel = existing_velocities[:, :, anchor_idx : anchor_idx + 1, :]
             else:
                 anchor = new_keyframes[anchor_idx - existing_n_kf]
+                vel = new_velocities[anchor_idx - existing_n_kf]
 
-            delta = token - anchor.astype(token.dtype)
+            prediction = anchor.astype(mx.float32) + vel.astype(mx.float32) * float(token_idx % stride)
+            prediction = prediction.astype(token.dtype)
+            delta = token - prediction
             codes, scale = codec.quantize_delta(delta)
             new_packed.append(pack_int4_codes(codes))
             new_scales.append(scale.squeeze(-1).astype(mx.float16))
 
         if new_keyframes:
-            stacked = mx.concatenate(new_keyframes, axis=2)
-            current = getattr(self, keyframes_attr)
-            setattr(self, keyframes_attr, stacked if current is None else mx.concatenate([current, stacked], axis=2))
+            stacked_kf = mx.concatenate(new_keyframes, axis=2)
+            stacked_vel = mx.concatenate(new_velocities, axis=2)
+            current_kf = getattr(self, keyframes_attr)
+            current_vel = getattr(self, velocities_attr)
+            setattr(self, keyframes_attr, stacked_kf if current_kf is None else mx.concatenate([current_kf, stacked_kf], axis=2))
+            setattr(self, velocities_attr, stacked_vel if current_vel is None else mx.concatenate([current_vel, stacked_vel], axis=2))
 
         if new_packed:
             packed = mx.concatenate(new_packed, axis=2)
@@ -133,9 +160,17 @@ class ChronoQuantCache:
         positions = mx.arange(self.offset, dtype=mx.int32)
         anchor_idx = positions // stride
         full = mx.take(keyframes, anchor_idx, axis=2).astype(mx.float16)
+        
+        velocities = self._active_velocities(component)
+        if velocities is not None:
+            vel = mx.take(velocities, anchor_idx, axis=2).astype(mx.float16)
+            alpha = (positions % stride).astype(mx.float16).reshape(1, 1, -1, 1)
+            prediction = full + vel * alpha
+        else:
+            prediction = full
 
         if packed is None or scales is None or packed.shape[2] == 0:
-            return full
+            return prediction
 
         pf_idx = positions - anchor_idx - 1
         safe_pf_idx = mx.maximum(pf_idx, 0)
@@ -145,7 +180,7 @@ class ChronoQuantCache:
         gathered_codes = mx.take(codes, safe_pf_idx, axis=2)
         gathered_scales = mx.take(scales, safe_pf_idx, axis=2)[..., None]
         delta = codec.dequantize_delta(gathered_codes, gathered_scales)
-        return full + mx.where(is_pframe, delta, mx.zeros_like(delta))
+        return prediction + mx.where(is_pframe, delta, mx.zeros_like(delta))
 
     def reconstruct_history(self):
         """Reconstruct full K/V history for fallback attention paths."""

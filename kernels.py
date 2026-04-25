@@ -150,6 +150,7 @@ _CHRONOQUANT_SDPA_SOURCE = """
             }
 
             float k_val = static_cast<float>(keyframes_k[kf_base_k + dim]);
+            k_val += static_cast<float>(velocities_k[kf_base_k + dim]) * static_cast<float>(t % stride_k);
             if (!k_is_keyframe) {
                 k_val += static_cast<float>(unpack_signed_int4(token_packed_k, dim)) * k_scale;
             }
@@ -171,6 +172,7 @@ _CHRONOQUANT_SDPA_SOURCE = """
             }
 
             float v_val = static_cast<float>(keyframes_v[kf_base_v + dim]);
+            v_val += static_cast<float>(velocities_v[kf_base_v + dim]) * static_cast<float>(t % stride_v);
             if (!v_is_keyframe) {
                 v_val += static_cast<float>(unpack_signed_int4(token_packed_v, dim)) * v_scale;
             }
@@ -232,9 +234,11 @@ _chronoquant_sdpa_kernel = mx.fast.metal_kernel(
     input_names=[
         "q",
         "keyframes_k",
+        "velocities_k",
         "packed_k",
         "scales_k",
         "keyframes_v",
+        "velocities_v",
         "packed_v",
         "scales_v",
         "params",
@@ -248,9 +252,11 @@ _chronoquant_sdpa_kernel = mx.fast.metal_kernel(
 def chronoquant_sdpa_kernel(
     q: mx.array,
     keyframes_k: mx.array,
+    velocities_k: mx.array,
     packed_k: mx.array,
     scales_k: mx.array,
     keyframes_v: mx.array,
+    velocities_v: mx.array,
     packed_v: mx.array,
     scales_v: mx.array,
     seq_len: int,
@@ -264,9 +270,11 @@ def chronoquant_sdpa_kernel(
         inputs=[
             q,
             keyframes_k,
+            velocities_k,
             packed_k,
             scales_k,
             keyframes_v,
+            velocities_v,
             packed_v,
             scales_v,
             params,

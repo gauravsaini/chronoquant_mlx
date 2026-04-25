@@ -47,9 +47,11 @@ def chronoquant_sdpa(
         out = chronoquant_sdpa_kernel(
             q=q,
             keyframes_k=cache.kernel_keyframes_k(),
+            velocities_k=cache._active_velocities("k").squeeze(0) if cache._active_velocities("k") is not None else mx.zeros_like(cache.kernel_keyframes_k()),
             packed_k=cache.kernel_packed_k(),
             scales_k=cache.kernel_scales_k(),
             keyframes_v=cache.kernel_keyframes_v(),
+            velocities_v=cache._active_velocities("v").squeeze(0) if cache._active_velocities("v") is not None else mx.zeros_like(cache.kernel_keyframes_v()),
             packed_v=cache.kernel_packed_v(),
             scales_v=cache.kernel_scales_v(),
             seq_len=cache.offset,
