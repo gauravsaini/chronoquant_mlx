@@ -69,11 +69,7 @@ constant uint MAX_HEAD_DIM = 256;
 constant uint MAX_SLOTS = MAX_HEAD_DIM / 32;
 constant uint NUM_SIMDGROUPS = 31;
 
-inline int unpack_signed_int4(const device uint32_t* packed, uint dim) {
-    uint word = dim >> 3;
-    uint shift = (dim & 7) << 2;
-    return int((packed[word] >> shift) & 0xFu) - 8;
-}
+#define unpack_signed_int4(packed, dim) (int((((packed)[(dim) >> 3] >> (((dim) & 7) << 2)) & 0xFu)) - 8)
 """
 
 _CHRONOQUANT_SDPA_SOURCE = """
@@ -89,6 +85,7 @@ _CHRONOQUANT_SDPA_SOURCE = """
     }
 
     uint T_kv = static_cast<uint>(params[0]);
+    uint T_compressed = static_cast<uint>(params[3]);
     uint stride_k = static_cast<uint>(params[1]);
     uint stride_v = static_cast<uint>(params[2]);
 
@@ -122,7 +119,8 @@ _CHRONOQUANT_SDPA_SOURCE = """
     float local_max = -1e10f;
     float local_sum = 0.0f;
 
-    for (uint t = simd_id; t < T_kv; t += NUM_SIMDGROUPS) {
+    // Loop 1: Distant Cache (Compressed)
+    for (uint t = simd_id; t < T_compressed; t += NUM_SIMDGROUPS) {
         uint k_anchor = t / stride_k;
         bool k_is_keyframe = (t % stride_k) == 0;
         uint k_pf = k_is_keyframe ? 0 : (t - k_anchor - 1);
@@ -136,8 +134,8 @@ _CHRONOQUANT_SDPA_SOURCE = """
         uint pf_base_k = (kv_head * pf_count_k + k_pf) * pf_words_k;
         uint pf_base_v = (kv_head * pf_count_v + v_pf) * pf_words_v;
 
-        const device uint32_t* token_packed_k = packed_k + pf_base_k;
-        const device uint32_t* token_packed_v = packed_v + pf_base_v;
+        auto token_packed_k = packed_k + pf_base_k;
+        auto token_packed_v = packed_v + pf_base_v;
 
         float k_scale = k_is_keyframe ? 0.0f : static_cast<float>(scales_k[kv_head * pf_count_k + k_pf]);
         float v_scale = v_is_keyframe ? 0.0f : static_cast<float>(scales_v[kv_head * pf_count_v + v_pf]);
@@ -177,6 +175,35 @@ _CHRONOQUANT_SDPA_SOURCE = """
                 v_val += static_cast<float>(unpack_signed_int4(token_packed_v, dim)) * v_scale;
             }
             local_acc[s] = local_acc[s] * factor + exp_s * v_val;
+        }
+    }
+
+    // Loop 2: Recent Cache (Uncompressed FP16)
+    uint T_recent = T_kv - T_compressed;
+    for (uint t = simd_id; t < T_recent; t += NUM_SIMDGROUPS) {
+        uint recent_base = (kv_head * T_recent + t) * D;
+
+        float partial = 0.0f;
+        for (uint s = 0; s < slots; s++) {
+            uint dim = lane_id + s * 32;
+            if (dim < D) {
+                partial += q_local[s] * static_cast<float>(recent_k[recent_base + dim]);
+            }
+        }
+
+        float score = simd_sum(partial);
+
+        float new_max = max(local_max, score);
+        float factor = metal::fast::exp(local_max - new_max);
+        float exp_s = metal::fast::exp(score - new_max);
+        local_max = new_max;
+        local_sum = local_sum * factor + exp_s;
+
+        for (uint s = 0; s < slots; s++) {
+            uint dim = lane_id + s * 32;
+            if (dim < D) {
+                local_acc[s] = local_acc[s] * factor + exp_s * static_cast<float>(recent_v[recent_base + dim]);
+            }
         }
     }
 
@@ -241,6 +268,8 @@ _chronoquant_sdpa_kernel = mx.fast.metal_kernel(
         "velocities_v",
         "packed_v",
         "scales_v",
+        "recent_k",
+        "recent_v",
         "params",
     ],
     output_names=["output"],
@@ -259,12 +288,15 @@ def chronoquant_sdpa_kernel(
     velocities_v: mx.array,
     packed_v: mx.array,
     scales_v: mx.array,
+    recent_k: mx.array,
+    recent_v: mx.array,
     seq_len: int,
+    compressed_len: int,
     stride_k: int,
     stride_v: int,
 ) -> mx.array:
     """Fused ChronoQuant SDPA for B=1, T_q=1 generation."""
-    params = mx.array([seq_len, stride_k, stride_v], dtype=mx.float32)
+    params = mx.array([seq_len, stride_k, stride_v, compressed_len], dtype=mx.float32)
     n_q_heads, head_dim = q.shape
     outputs = _chronoquant_sdpa_kernel(
         inputs=[
@@ -277,6 +309,8 @@ def chronoquant_sdpa_kernel(
             velocities_v,
             packed_v,
             scales_v,
+            recent_k,
+            recent_v,
             params,
         ],
         grid=(n_q_heads * FUSED_THREADGROUP_SIZE, 1, 1),
