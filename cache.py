@@ -30,7 +30,7 @@ class ChronoQuantCache:
         self.delta_bits = delta_bits
         self.use_fused = use_fused
         self.codec_k = ChronoQuantCodecMLX(stride=stride_k, delta_bits=delta_bits)
-        self.codec_v = ChronoQuantCodecMLX(stride=stride_v, delta_bits=delta_bits)
+        self.codec_v = ChronoQuantCodecMLX(stride=stride_v, delta_bits=3)
 
         self.offset = 0
         self.head_dim = None
