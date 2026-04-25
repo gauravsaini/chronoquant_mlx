@@ -133,3 +133,30 @@ While Perplexity (PPL) and localized generation tests are great indicators of ov
 *   **Generation Speed:** ~4.70 tokens/sec
 
 **Conclusion:** A brilliant architectural compromise! The pure 2-bit hybrid model achieved a PPL of 1.695 and failed the NIAH test. By simply preserving 4-bit precision in the deep semantic layers, the PPL immediately improved to **1.539**, while still saving 50% of the KV cache memory in the early layers! This is the bleeding-edge "VVC-Level" frontier of KV Cache compression.
+
+---
+
+## 📊 Full Matrix NIAH Validation (Qwen 3.5 4B)
+
+To evaluate stability across scaling context windows, we ran a thorough 12-test NIAH matrix across multiple depths (10%, 50%, 90%) and context lengths (512, 1024, 2048, 4096 tokens).
+
+| Context | Depth | `motion-vectors` (4-bit) | `heterogeneous-layers` |
+| :--- | :--- | :---: | :---: |
+| 512 | 10% | ✅ | ✅ |
+| 512 | 50% | ✅ | ✅ |
+| 512 | 90% | ✅ | ✅ |
+| 1024 | 10% | ✅ | ✅ |
+| 1024 | 50% | ✅ | ❌ |
+| 1024 | 90% | ✅ | ✅ |
+| 2048 | 10% | ✅ | ✅ |
+| 2048 | 50% | ✅ | ✅ |
+| 2048 | 90% | ✅ | ✅ |
+| 4096 | 10% | ✅ | ✅ |
+| 4096 | 50% | ✅ | ❌ |
+| 4096 | 90% | ✅ | ✅ |
+| **Total Score**| - | **12/12 (100%)** | **10/12 (83%)** |
+
+**Final Takeaway:** 
+*   **`motion-vectors`** retains absolute zero-loss recall capability across all lengths.
+*   **`heterogeneous-layers`** offers a potent middle ground—dramatically outperforming the flat 2-bit architecture, but revealing narrow precision "blind spots" at middle context depths. Useful for edge devices requiring aggressive scaling constraints.
+

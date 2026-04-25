@@ -57,6 +57,7 @@ def chronoquant_sdpa(
             seq_len=cache.offset,
             stride_k=cache.stride_k,
             stride_v=cache.stride_v,
+            delta_bits=cache.codec_k.delta_bits,
         )
         return out.reshape(batch, n_q_heads, q_len, head_dim).astype(queries.dtype)
 
