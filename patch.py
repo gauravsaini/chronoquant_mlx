@@ -49,17 +49,20 @@ def create_chronoquant_caches(
     stride_v: int = 8,
     delta_bits: int = 4,
     use_fused: bool = True,
+    heterogeneous_layers: bool = False,
 ):
     """Create ChronoQuant caches for all KV cache slots in model."""
     from mlx_lm.models.cache import KVCache, make_prompt_cache
 
     caches = model.make_cache() if hasattr(model, "make_cache") else make_prompt_cache(model)
-    for index in range(len(caches)):
+    total_layers = len(caches)
+    for index in range(total_layers):
         if isinstance(caches[index], KVCache):
+            layer_bits = 2 if (heterogeneous_layers and index < total_layers // 2) else delta_bits
             caches[index] = ChronoQuantCache(
                 stride_k=stride_k,
                 stride_v=stride_v,
-                delta_bits=delta_bits,
+                delta_bits=layer_bits,
                 use_fused=use_fused,
             )
     return caches
