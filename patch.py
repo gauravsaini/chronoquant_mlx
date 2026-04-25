@@ -82,13 +82,19 @@ def create_chronoquant_caches(
     from mlx_lm.models.cache import KVCache, make_prompt_cache
 
     caches = model.make_cache() if hasattr(model, "make_cache") else make_prompt_cache(model)
-    for index in range(len(caches)):
+    total_layers = len(caches)
+    for index in range(total_layers):
         if isinstance(caches[index], KVCache):
+            # Topology Preservation: Assign higher precision to deep layers for 2b limits
+            layer_bits_v = delta_bits_v
+            if delta_bits_v == 2 and index >= total_layers - 4:
+                layer_bits_v = 4
+                
             caches[index] = ChronoQuantCache(
                 stride_k=stride_k,
                 stride_v=stride_v,
                 delta_bits_k=delta_bits_k,
-                delta_bits_v=delta_bits_v,
+                delta_bits_v=layer_bits_v,
                 use_fused=use_fused,
                 residual_scale=residual_scale,
                 pruning_ratio=pruning_ratio,
