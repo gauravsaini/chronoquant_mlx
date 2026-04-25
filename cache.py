@@ -153,7 +153,7 @@ class ChronoQuantCache:
                 idx = int(flat_delta.size * self.pruning_ratio)
                 idx = min(idx, flat_delta.size - 1)
                 thresh = sorted_flat[idx]
-                delta = mx.where(abs_delta < thresh, mx.zeros_like(delta), delta)
+                delta = mx.sign(delta) * mx.maximum(abs_delta - thresh, 0.0)
             codes, scale = codec.quantize_delta(delta)
             new_packed.append(pack_int4_codes(codes))
             new_scales.append(scale.squeeze(-1).astype(mx.float16))
