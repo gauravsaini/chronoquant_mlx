@@ -103,3 +103,20 @@ This repository contains experimental branches exploring advanced video-codec in
 *   **Memory Growth:** ~11.5 MB per 1,000 tokens (Theoretical 5.4x compression)
 
 **Conclusion:** The Holy Grail of KV Cache compression! The static 2-bit P-frame test (Exp 2) had a PPL of 1.95. By applying motion vectors, we dropped the PPL to **1.695**! The generation was flawlessly coherent. We successfully achieved a **5.4x compression ratio** with minimal degradation to model quality, all while maintaining O(1) parallel GPU decompression speed.
+
+---
+
+## 🎯 Needle In A Haystack (NIAH) Validation
+
+While Perplexity (PPL) and localized generation tests are great indicators of overall coherence, true "Long Context" viability requires the model to recall exact facts from deep within its memory. We ran a rigorous **NIAH** benchmark across all branches:
+
+| Branch | NIAH Result | Why? (Analysis) |
+| :--- | :--- | :--- |
+| `motion-vectors` | **✅ PASSED** | Retained enough precision (4-bit) for exact fact retrieval. The predictive extrapolation smoothed out arithmetic quantization errors without destroying high-frequency data. |
+| `bframe-interpolation`| ❌ FAILED | B-frames look ahead to the *next* keyframe during prefill. This mathematically breaks causality, leaking future token information into past representations, confusing the model's precise recall. |
+| `2bit-pframes` | ❌ FAILED | Extreme 2-bit quantization causes too much information loss. The model retains enough global semantic understanding to write coherent text (PPL 1.95), but exact "needle" facts are destroyed by the quantization noise. |
+| `spatial-subsampling` | ❌ FAILED | Converting GQA to MQA by averaging the 4 KV heads destroyed the distinct routing pathways the attention mechanism relies on to find isolated facts. |
+| `hybrid-2bit-motion` | ❌ FAILED | Inherits the exact fact destruction from the extreme 2-bit quantization bucket. |
+
+### The Final Verdict
+**Experiment 4 (`motion-vectors`)** is the absolute winner. It represents the limit of how far we can push compression (4-bit with predictive residual encoding) before the model loses its ability to perform exact reasoning and retrieval on long contexts.
