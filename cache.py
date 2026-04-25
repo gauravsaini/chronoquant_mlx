@@ -179,6 +179,11 @@ class ChronoQuantCache:
         codes = unpack_int4_codes(packed, self.head_dim)
         gathered_codes = mx.take(codes, safe_pf_idx, axis=2)
         gathered_scales = mx.take(scales, safe_pf_idx, axis=2)[..., None]
+        
+        alpha_decay = (positions % stride).astype(mx.float16).reshape(1, 1, -1, 1)
+        decay_factor = mx.exp(-alpha_decay * 0.01)
+        gathered_scales = gathered_scales * decay_factor
+        
         delta = codec.dequantize_delta(gathered_codes, gathered_scales)
         return prediction + mx.where(is_pframe, delta, mx.zeros_like(delta))
 

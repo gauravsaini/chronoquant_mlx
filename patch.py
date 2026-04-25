@@ -9,9 +9,32 @@ _original_sdpa = _base.scaled_dot_product_attention
 _patched = False
 
 
+import math
+import mlx.core as mx
+
+_HADAMARD_CACHE = {}
+
+def get_hadamard_matrix(dim: int, dtype):
+    if dim not in _HADAMARD_CACHE:
+        H = mx.array([[1.0]], dtype=dtype)
+        while H.shape[0] < dim:
+            H = mx.concatenate([
+                mx.concatenate([H, H], axis=1),
+                mx.concatenate([H, -H], axis=1)
+            ], axis=0)
+        H = H / math.sqrt(dim)
+        _HADAMARD_CACHE[dim] = H
+    return _HADAMARD_CACHE[dim]
+
+def apply_hadamard(tensor):
+    D = tensor.shape[-1]
+    H = get_hadamard_matrix(D, tensor.dtype)
+    return tensor @ H
+
 def _patched_sdpa(queries, keys, values, cache, scale, mask, **kwargs):
     if isinstance(cache, ChronoQuantCache):
         return chronoquant_sdpa(queries, keys, values, cache, scale, mask)
+        
     return _original_sdpa(queries, keys, values, cache, scale, mask, **kwargs)
 
 

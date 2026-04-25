@@ -141,6 +141,11 @@ _CHRONOQUANT_SDPA_SOURCE = """
 
         float k_scale = k_is_keyframe ? 0.0f : static_cast<float>(scales_k[kv_head * pf_count_k + k_pf]);
         float v_scale = v_is_keyframe ? 0.0f : static_cast<float>(scales_v[kv_head * pf_count_v + v_pf]);
+        
+        float k_decay = metal::fast::exp(-static_cast<float>(t % stride_k) * 0.01f);
+        float v_decay = metal::fast::exp(-static_cast<float>(t % stride_v) * 0.01f);
+        k_scale *= k_decay;
+        v_scale *= v_decay;
 
         float partial = 0.0f;
         for (uint s = 0; s < slots; s++) {

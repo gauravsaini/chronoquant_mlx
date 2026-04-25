@@ -26,7 +26,8 @@ class ChronoQuantCodecMLX:
         # Avoid division by zero
         scale_safe = mx.where(scale < 1e-10, 1.0, scale)
         
-        codes = mx.round(delta / scale_safe)
+        scaled = delta / scale_safe
+        codes = mx.where(mx.abs(scaled) < 0.5, mx.zeros_like(scaled), mx.round(scaled))
         codes = mx.clip(codes, -self.half_levels, self.half_levels - 1)
         
         # If scale was exactly 0, codes should be 0
