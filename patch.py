@@ -47,7 +47,7 @@ def create_chronoquant_caches(
     model,
     stride_k: int = 32,
     stride_v: int = 8,
-    delta_bits: int = 4,
+    delta_bits: int = 2,
     use_fused: bool = True,
 ):
     """Create ChronoQuant caches for all KV cache slots in model."""
