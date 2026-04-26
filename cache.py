@@ -27,6 +27,8 @@ class ChronoQuantCache:
         dead_zone_k: float = 0.0,
         dead_zone_v: float = 0.05,
         use_fused: bool = True,
+        per_layer_v_bits: list = None,
+        layer_idx: int = 0,
     ):
         self.stride_k = stride_k
         self.stride_v = stride_v
@@ -35,9 +37,9 @@ class ChronoQuantCache:
         self.dead_zone_k = dead_zone_k
         self.dead_zone_v = dead_zone_v
         self.use_fused = use_fused
+        self.per_layer_v_bits = per_layer_v_bits or []
+        self.layer_idx = layer_idx
         self.codec_k = ChronoQuantCodecMLX(stride=stride_k, delta_bits=delta_bits_k, dead_zone_ratio=dead_zone_k)
-        self.codec_v = ChronoQuantCodecMLX(stride=stride_v, delta_bits=delta_bits_v, dead_zone_ratio=dead_zone_v)
-
         self.offset = 0
         self.head_dim = None
 
@@ -131,7 +133,7 @@ class ChronoQuantCache:
             return None
 
         stride = self.stride_k if component == "k" else self.stride_v
-        codec = self.codec_k if component == "k" else self.codec_v
+        codec = self.codec_k if component == "k" else self._get_codec_for_v()
         keyframes = self._active_keyframes(component)
         packed = self._active_packed(component)
         scales = self._active_scales(component)
@@ -187,6 +189,12 @@ class ChronoQuantCache:
             return scales.squeeze(0)
         return mx.zeros((self.keyframes_v.shape[1], 1), dtype=mx.float16)
 
+    def _get_codec_for_v(self):
+        if not hasattr(self, '_codec_v') or self._codec_v is None:
+            v_bits = self.per_layer_v_bits[min(self.layer_idx, len(self.per_layer_v_bits)-1)] if self.per_layer_v_bits else self.delta_bits_v
+            self._codec_v = ChronoQuantCodecMLX(stride=self.stride_v, delta_bits=v_bits, dead_zone_ratio=self.dead_zone_v)
+        return self._codec_v
+    
     def update_and_fetch(self, keys: mx.array, values: mx.array):
         """Compress new KV states and return lightweight placeholders."""
         _, _, _, head_dim = keys.shape
@@ -196,7 +204,8 @@ class ChronoQuantCache:
             raise ValueError(f"ChronoQuantCache head_dim changed: {self.head_dim} -> {head_dim}")
 
         self._append_component("k", keys, self.stride_k, self.codec_k)
-        self._append_component("v", values, self.stride_v, self.codec_v)
+        codec_v = self._get_codec_for_v()
+        self._append_component("v", values, self.stride_v, codec_v)
         self.offset += keys.shape[2]
 
         state = self.state
