@@ -28,15 +28,21 @@ class ChronoQuantCodecMLX:
             codes: [B, n_kv_heads, S, head_dim] (int8)
             scales: [B, n_kv_heads, S, 1] (float16)
         """
-        # Per-token, per-head scale: max absolute value over head_dim
+        # Per-token, per-head initial scale: max absolute value over head_dim
         amax = mx.abs(delta).max(axis=-1, keepdims=True)
+        scale = amax / (self.half_levels - 1)
         
         # Dead-zone: zero out near-zero residuals before quantization
         if self.dead_zone_ratio > 0.0:
             threshold = amax * self.dead_zone_ratio
-            delta = mx.where(mx.abs(delta) < threshold, 0.0, delta)
-        
-        scale = amax / (self.half_levels - 1)
+            delta_clipped = mx.where(mx.abs(delta) < threshold, 0.0, delta)
+            
+            # Recompute scale after dead-zone clipping (key fix!)
+            amax_clipped = mx.abs(delta_clipped).max(axis=-1, keepdims=True)
+            # If all values were dead-zoned, keep original scale to avoid div-by-zero
+            amax_safe = mx.where(amax_clipped < 1e-10, amax, amax_clipped)
+            scale = amax_safe / (self.half_levels - 1)
+            delta = delta_clipped
         
         # Avoid division by zero
         scale_safe = mx.where(scale < 1e-10, 1.0, scale)
