@@ -1,54 +1,97 @@
 # ChronoQuant MLX
 
-This directory contains the Apple Silicon (MLX) implementation of **ChronoQuant**, a predictive KV-cache compression codec.
+Apple Silicon / MLX implementation of ChronoQuant, a temporal predictive KV-cache codec.
 
-## Overview
-ChronoQuant compresses the KV cache by treating it as a temporal signal. Instead of compressing every token independently (or relying on massive pre-trained codebooks), ChronoQuant:
-1. Stores high-precision FP16 **I-frames** (anchor tokens) periodically.
-2. Encodes intermediate tokens as **P-frames** (4-bit residual deltas) from the nearest anchor.
+ChronoQuant treats the KV cache like a video stream:
 
-This directory focuses on the highly-optimized **Metal implementation** designed to execute on Apple Silicon unified memory architecture.
+1. Periodic FP16 I-frames store exact key/value anchors.
+2. Intermediate P-frames store quantized residual deltas from the nearest anchor.
+3. A fused Metal attention path decodes the residuals inside attention instead of reconstructing full KV tensors in the Python/MLX graph.
 
-## Key Components
+## Main Modes
 
-* `codec.py`: The Python-level frontend for the ChronoQuant codec. It manages the quantization of deltas into 4-bit and handles the symmetric packing.
-* `kernels.py`: The core fused Metal kernels. To prevent the decoding process from bottlenecking the system and erasing the memory bandwidth savings, the 4-bit deltas are densely packed (8 values per `uint32`) and decoded *inside* the attention loop.
-* `models/`: Model architecture definitions (e.g., Qwen3.5, Phi-3.5) with ChronoQuant SDPA natively injected.
+### Standard Mode
 
-## Compression Knobs
-ChronoQuant avoids arbitrary bit-level configurations (which are hostile to hardware). Deltas are always 4-bit.
-To control compression vs. quality, tune the **stride** parameters:
-- `k_stride` / `v_stride`: The distance between I-frames. Larger strides mean higher compression but potentially more temporal drift.
+Best default for quality and simplicity.
 
-## Environment
-Requires `mlx` and `mlx_lm`. All execution should be run on an Apple Silicon device.
+```python
+import chronoquant_mlx
 
----
+chronoquant_mlx.apply()
+caches = chronoquant_mlx.create_chronoquant_caches(
+    model,
+    stride_k=32,
+    stride_v=8,
+)
+logits = model(input_ids, cache=caches)
+```
 
-## Deployment Modes
+This uses INT4 residual deltas for both keys and values.
 
-### 1. Standard Mode (Default)
-**Best for:** Zero-latency deployment, maximum simplicity.
-*   **Precision:** Uniform 4-bit temporal deltas.
-*   **Metadata:** Zero.
-*   **Accuracy:** Near-lossless (+0.06 PPL).
-*   **Usage:** `patch.apply()`
+### Full-Throttle V3
 
-### 2. Full-Throttle Mode (Aligned)
-**Best for:** Maximum compression on large models (9B+).
-*   **Precision:** Mixed 4/3/2-bit precision based on attention-aligned variance.
-*   **Technique:** Learned Orthogonal Rotation ($R$) to align KV dimensions to optimal quantization axes.
-*   **Compression:** Up to 6.4x on key matrices.
-*   **Usage:** See `attention_aligned.py`
+Measured aggressive no-learned-state preset for Qwen3.5-9B long-context runs.
 
-## Benchmarks (Nvidia T4 @ 16K Context)
+```python
+import chronoquant_mlx
 
-| Metric | Baseline (FP16) | ChronoQuant |
-| :--- | :--- | :--- |
-| **Perplexity** | 13.3764 | 13.3764 (Perfect Match) |
-| **Generation Speed** | 3.86 ms/tok | 3.00 ms/tok (1.29x Speedup) |
-| **Cache Memory** | 1024 MB | 600 MB (1.71x Compression) |
-| **NIAH Retrieval** | ✅ PASSED | ✅ PASSED |
+chronoquant_mlx.apply()
+caches = chronoquant_mlx.create_full_throttle_caches(model)
+logits = model(input_ids, cache=caches)
+```
 
-## Reproducibility
-The end-to-end validation pipeline for Google Colab is available in `chronoquant_colab_final.ipynb`. This notebook performs the full mathematical simulation of the codec to verify PPL and NIAH fidelity.
+Equivalent explicit config:
+
+```python
+caches = chronoquant_mlx.create_chronoquant_caches(
+    model,
+    stride_k=64,
+    stride_v=32,
+    delta_bits_k=4,
+    delta_bits_v=3,
+    dead_zone_k=0.0,
+    dead_zone_v=0.05,
+)
+```
+
+Important caveat: the current fused MLX storage path still packs residual codes into INT4 lanes. So Full-Throttle V3 is a measured quality/speed/active-byte preset, not proof of true physical variable-bit packing.
+
+## Measured Qwen3.5-9B Results
+
+Long-context validation on Apple Silicon / MLX:
+
+| Context | Method | PPL | TPS | KV Bytes/Token | Compression |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 4096 | FP16 Baseline | 1.2027 | 7.58 | 45344.0 | 1.00x |
+| 4096 | Standard `k=32,v=8` | 1.2004 | 6.96 | 22806.0 | 1.99x |
+| 4096 | Full-Throttle V3 | 1.2004 | 6.83 | 21469.0 | 2.11x |
+| 8192 | FP16 Baseline | 1.1080 | 7.48 | 39056.0 | 1.00x |
+| 8192 | Standard `k=32,v=8` | 1.1074 | 6.55 | 16518.0 | 2.36x |
+| 8192 | Full-Throttle V3 | 1.1053 | 6.56 | 15181.0 | 2.57x |
+| 16384 | FP16 Baseline | 1.0593 | 6.99 | 35912.0 | 1.00x |
+| 16384 | Standard `k=32,v=8` | 1.0593 | 5.68 | 13374.0 | 2.69x |
+| 16384 | Full-Throttle V3 | 1.0560 | 5.67 | 12037.0 | 2.98x |
+
+Full-Throttle V2 was tested as a more aggressive 2-bit value-residual ablation. It achieved the same measured storage as V3 but degraded perplexity, so it is intentionally not exposed as a recommended preset.
+
+## Components
+
+- `codec.py`: per-token residual quantization and dead-zone handling.
+- `cache.py`: ChronoQuant KV cache object with active-byte accounting.
+- `kernels.py`: INT4 packing helpers and fused Metal SDPA kernel.
+- `attention.py`: dispatch logic for fused generation path and fallback reconstruction path.
+- `patch.py`: MLX attention monkey-patch and cache factory helpers.
+
+## Validation
+
+The main validation harness lives in:
+
+```bash
+scripts/run_chronoquant_full_throttle_eval.py
+```
+
+The remote helper for the Qwen3.5-9B benchmark box lives in:
+
+```bash
+scripts/run_chronoquant_full_throttle_remote.sh
+```

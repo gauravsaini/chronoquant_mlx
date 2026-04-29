@@ -77,3 +77,28 @@ def create_chronoquant_caches(
             caches[index].layer_idx = index  # for per-layer lookup
     return caches
 
+
+FULL_THROTTLE_V3_CONFIG = {
+    "stride_k": 64,
+    "stride_v": 32,
+    "delta_bits_k": 4,
+    "delta_bits_v": 3,
+    "dead_zone_k": 0.0,
+    "dead_zone_v": 0.05,
+}
+
+
+def create_full_throttle_caches(model, use_fused: bool = True):
+    """Create the measured Full-Throttle V3 cache preset.
+
+    This is the no-learned-state aggressive stride configuration validated on
+    Qwen3.5-9B through 16K tokens. The current MLX storage path still packs
+    residual codes into INT4 lanes, so this preset should be understood as a
+    quality/speed/active-byte configuration, not true physical variable-bit
+    packing.
+    """
+    return create_chronoquant_caches(
+        model,
+        use_fused=use_fused,
+        **FULL_THROTTLE_V3_CONFIG,
+    )
